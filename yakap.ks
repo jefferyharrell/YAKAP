@@ -23,6 +23,9 @@ DECLARE GLOBAL pauseGameWhenFinished             IS   TRUE.
 // where it's safe. Ish. Use at your own risk.
 DECLARE GLOBAL useTimeWarp                       IS  FALSE.
 
+// Debugging prints more messages to the screen.
+DECLARE GLOBAL useDebugging                      IS   TRUE.
+
 ////////////////////////////////////////////////////////////////////////////////
 //// TUNABLE PARAMETERS                                                     ////
 ////////////////////////////////////////////////////////////////////////////////
@@ -1531,6 +1534,10 @@ DECLARE GLOBAL FUNCTION RoundZero {
 }
 
 DECLARE GLOBAL FUNCTION InitializeScreen {
+    IF useDebugging {
+        RETURN.
+    }
+
     CLEARSCREEN.
 
 //                   1         2         3         4         5
@@ -1552,6 +1559,9 @@ DECLARE GLOBAL FUNCTION InitializeScreen {
 }
 
 DECLARE GLOBAL FUNCTION UpdateScreen {
+    IF useDebugging {
+        RETURN.
+    }
 
     IF MISSIONTIME > 0 {
         PRINT TIME(MISSIONTIME):CLOCK                               AT ( 4,  1).
@@ -1591,8 +1601,22 @@ DECLARE GLOBAL missionLogLineNumber IS 12.
 DECLARE GLOBAL FUNCTION MissionLog {
     DECLARE PARAMETER line.
 
-    PRINT "T+" + TIME(MISSIONTIME):CLOCK + " " + line AT (0, missionLogLineNumber).
-    SET missionLogLineNumber TO missionLogLineNumber + 1.
+    IF useDebugging {
+        PRINT "T+" + TIME(MISSIONTIME):CLOCK + " " + line.
+    } ELSE {
+        PRINT "T+" + TIME(MISSIONTIME):CLOCK + " " + line AT (0, missionLogLineNumber).
+        SET missionLogLineNumber TO missionLogLineNumber + 1.
+    }
+
+    RETURN.
+}
+
+DECLARE GLOBAL FUNCTION MissionDebug {
+    DECLARE PARAMETER line.
+
+    IF useDebugging {
+        MissionLog(line).
+    }
 
     RETURN.
 }
