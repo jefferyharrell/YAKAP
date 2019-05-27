@@ -24,7 +24,7 @@ DECLARE GLOBAL pauseGameWhenFinished             IS   TRUE.
 DECLARE GLOBAL useTimeWarp                       IS  FALSE.
 
 // Debugging prints more messages to the screen.
-DECLARE GLOBAL useDebugging                      IS   TRUE.
+DECLARE GLOBAL useDebugging                      IS  FALSE.
 
 ////////////////////////////////////////////////////////////////////////////////
 //// TUNABLE PARAMETERS                                                     ////
@@ -73,6 +73,14 @@ DECLARE GLOBAL controlPitch                      IS  0.0. // ° above the horizo
 // This varies depending on which mode we're in.
 DECLARE GLOBAL gForceLimit                       IS  0.0.
 
+// Keep track of which stage we're on.
+DECLARE GLOBAL currentStage                      IS  0.
+
+// And which stages actually exist.
+DECLARE GLOBAL stageOneExists                    IS FALSE.
+DECLARE GLOBAL stageOneSideBoosterExists         IS FALSE.
+DECLARE GLOBAL stageTwoExists                    IS FALSE.
+
 // These lists of parts are iterated over at various points in the program.
 DECLARE GLOBAL enginesStageOneAll                IS LIST().
 DECLARE GLOBAL enginesStageOneAllThrottleable    IS LIST().
@@ -85,14 +93,10 @@ DECLARE GLOBAL enginesStageTwoAll                IS LIST().
 DECLARE GLOBAL enginesStageTwoAllThrottleable    IS LIST().
 DECLARE GLOBAL enginesStageTwoAllThrottleLocked  IS LIST().
 
-DECLARE GLOBAL enginesRunningAllThrottleable     IS LIST().
-DECLARE GLOBAL enginesRunningAllThrottleLocked   IS LIST().
-
 DECLARE GLOBAL payloadFairingsAll                IS QUEUE().
 
-DECLARE GLOBAL deployableSolarPanelsStageTwo     IS QUEUE().
-
-DECLARE GLOBAL deployableAntennasStageTwo        IS QUEUE().
+DECLARE GLOBAL enginesRunningAllThrottleable     IS LIST().
+DECLARE GLOBAL enginesRunningAllThrottleLocked   IS LIST().
 
 // PID controllers. Coefficients have been determined empirically.
 DECLARE GLOBAL throttlePIDController IS PIDLOOP(0.250, 0.200, 0.000, 0.1, 1.0).
@@ -360,138 +364,129 @@ DECLARE GLOBAL FUNCTION ModePrelaunchTransitionInFunction {
 
     ////////////////////////////////////////////////////////////////////////////
 
-    // Now we do a lot of work on the part tree. This is all fairly messy by
-    // necessity because of how KSP organizes parts into "stages." We have to
-    // traverse parts of the tree to translate KSP's idea of "stages" into
-    // something that makes sense.
-
-    DECLARE LOCAL kspS1StageNumber IS STAGE:NUMBER - 1.
+    // Infer some things about how the vehicle is constructed.
 
     DECLARE LOCAL allParts IS LIST().
     LIST PARTS IN allParts.
 
     DECLARE LOCAL allEngines IS LIST().
-    LIST ENGINES in allEngines.
+    LIST ENGINES IN allEngines.
 
-    // Make a list of all the engines on the first stage. This will include both
-    // the core booster and any side boosters that happen to be present.
+    // A temporary variable to be a pointer to some part on the vehicle.
 
-    FOR e IN allEngines {
-        IF e:STAGE = kspS1StageNumber {
-            enginesStageOneAll:ADD(e).
+    DECLARE LOCAL p IS 0.
+
+    // KSP uses both 0 and -1 as stage numbers, so we have to pick something
+    // that the game would never use.
+
+    DECLARE LOCAL kspS1StageNumber IS -2.
+    DECLARE LOCAL kspS2StageNumber IS -2.
+
+    // Assume that the first stage is the one that'll be activated as soon as
+    // the player presses the space bar.
+
+    SET kspS1StageNumber TO STAGE:NUMBER - 1.
+
+    // Find all engines on the vehicle that are in stage one.
+
+    FOR i IN allEngines {
+        IF i:STAGE = kspS1StageNumber {
+            enginesStageOneAll:ADD(i).
         }
     }
 
-    // Make separate lists of first-stage engines which can and cannot be
-    // throttled.
+    // If we can't find any engines on the first stage, this program can't do
+    // anything, so we just skip to the end.
 
-    FOR e IN enginesStageOneAll {
-        IF e:THROTTLELOCK {
-            enginesStageOneAllThrottleLocked:ADD(e).
+    IF enginesStageOneAll:EMPTY {
+        SET StateFunction TO ModeEndProgramTransitionInFunction@.
+        RETURN.
+    } ELSE {
+        SET stageOneExists TO TRUE.
+    }
+
+    // Separate the engines on stage one into lists of throttleable and non-
+    // throttleable engines.
+
+    FOR i IN enginesStageOneAll {
+        IF i:THROTTLELOCK {
+            enginesStageOneAllThrottleLocked:ADD(i).
         } ELSE {
-            enginesStageOneAllThrottleable:ADD(e).
+            enginesStageOneAllThrottleable:ADD(i).
         }
     }
 
-    // Figure out whether each first-stage engine is in the core booster or is
-    // part of a parallel (i.e., side) booster. This part of the program
+    // Figure out whether each engine on the first stage is part of the core
+    // booster or a parallel (i.e., strap-on) booster. This part of the program
     // depends on the fact that stack decouplers have "ModuleDecouple" while
-    // radial ones have "ModuleAnchoredDecoupler." This is very fragile and
-    // will break if KSP changes such that this assumption is no longer valid.
+    // radial ones have "ModuleAnchoredDecoupler." Unfortunately this makes
+    // this part of the program is rather fragile.
 
-    FOR e IN enginesStageOneAll {
-        DECLARE LOCAL p IS e.
-        UNTIL p:HASMODULE("ModuleDecouple") OR p:HASMODULE("ModuleAnchoredDecoupler") {
+    FOR i IN enginesStageOneAll {
+        SET p TO i.
+        UNTIL p = SHIP:ROOTPART OR p:HASMODULE("ModuleDecouple") OR p:HASMODULE("ModuleAnchoredDecoupler") {
             SET p TO p:PARENT.
 
-            // If we get all the way up to the root part without finding a
-            // decoupler, the ship is CLEARLY not built in a way that makes
-            // this program very useful.
-            //
-            // It would be nice if we could end the program without pulling
-            // the plug on the whole computer, but that feature is not
-            // currently part of kOS.
-
-            IF p = SHIP:ROOTPART {
-                CLEARSCREEN.
-                PRINT "No stack decouplers found. This program only works with two-stage rockets.".
-                SHUTDOWN.
+            IF p = SHIP:ROOTPART OR p:HASMODULE("ModuleDecouple") {
+                enginesStageOneCoreAll:ADD(i).
             }
 
-            IF p:HASMODULE("ModuleDecouple") {
-                enginesStageOneCoreAll:ADD(e).
-            }
             IF p:HASMODULE("ModuleAnchoredDecoupler") {
-                enginesStageOneParallelAll:ADD(e).
+                enginesStageOneParallelAll:ADD(i).
             }
         }
     }
 
-    // Walk up the part tree from a core booster engine to the first stack
-    // decoupler we find. We will assume that everything above this decoupler
-    // comprises the second stage plus payload.
-
-    DECLARE LOCAL coreDecoupler IS enginesStageOneCoreAll[0].
-    UNTIL coreDecoupler:HASMODULE("ModuleDecouple") {
-        SET coreDecoupler TO coreDecoupler:PARENT.
+    IF NOT enginesStageOneParallelAll:EMPTY {
+        SET stageOneSideBoosterExists TO TRUE.
     }
 
-    DECLARE LOCAL kspS2StageNumber IS coreDecoupler:STAGE - 1.
+    // Pick any stage-one engine on the core booster and walk up the part tree
+    // until we find a stack decoupler. Assume the stage above this decoupler's
+    // stage is stage two.
 
-    // Find all the engines in stage two (i.e., the stage immediately above
-    // the one containing the core booster decoupler).
+    SET p TO enginesStageOneCoreAll[0].
+    UNTIL p = SHIP:ROOTPART OR p:HASMODULE("ModuleDecouple") {
+        SET p TO p:PARENT.
+    }
 
-    FOR e in allEngines {
-        IF e:STAGE = kspS2StageNumber {
-            enginesStageTwoAll:ADD(e).
+    IF p:HASMODULE("ModuleDecouple") {
+        SET kspS2StageNumber TO p:STAGE - 1.
+    }
+
+    // Find all engines on the vehicle that are in stage two.
+
+    FOR i IN allEngines {
+        IF i:STAGE = kspS2StageNumber {
+            enginesStageTwoAll:ADD(i).
         }
     }
 
-    // Separate the stage-two engines into throttleable and non-throttleable.
+    IF NOT enginesStageTwoAll:EMPTY {
+        SET stageTwoExists TO TRUE.
+    }
 
-    FOR e IN enginesStageTwoAll {
-        IF e:THROTTLELOCK {
-            enginesStageTwoAllThrottleLocked:ADD(e).
+    // Separate the engines on stage two into lists of throttleable and non-
+    // throttleable engines.
+
+    FOR i IN enginesStageTwoAll {
+        IF i:THROTTLELOCK {
+            enginesStageTwoAllThrottleLocked:ADD(i).
         } ELSE {
-            enginesStageTwoAllThrottleable:ADD(e).
+            enginesStageTwoAllThrottleable:ADD(i).
         }
     }
 
     // Find all the jettison-able payload fairings on the vehicle. We will
     // jettison these during ascent at a predetermined dynamic pressure. See
     // TUNABLE PARAMETERS.
-    //
-    // This should work correctly both with the stock payload fairings
-    // ("ModuleProceduralFairing") and fairings from the Procedural Fairings
-    // mod ("ProceduralFairingDecoupler").
 
-    FOR p IN allParts {
-        IF p:HASMODULE("ModuleProceduralFairing") AND p:GETMODULE("ModuleProceduralFairing"):HASEVENT("deploy") {
-            payloadFairingsAll:PUSH(p).
+    FOR i IN allParts {
+        IF i:HASMODULE("ModuleProceduralFairing") AND i:GETMODULE("ModuleProceduralFairing"):HASEVENT("deploy") {
+            payloadFairingsAll:PUSH(i).
         }
-        IF p:HASMODULE("ProceduralFairingDecoupler") AND p:GETMODULE("ProceduralFairingDecoupler"):HASEVENT("jettison fairing") {
-            payloadFairingsAll:PUSH(p).
-        }
-    }
-
-    // Find all the deployable solar panels on stage two. We will deploy these
-    // when the second stage shuts down.
-
-    FOR p IN allParts {
-        IF p:STAGE = kspS2StageNumber - 1 AND p:HASMODULE("ModuleDeployableSolarPanel") AND p:GETMODULE("ModuleDeployableSolarPanel"):HASEVENT("extend solar panel") {
-            deployableSolarPanelsStageTwo:PUSH(p).
-        }
-        IF p:STAGE = kspS2StageNumber - 1 AND p:HASMODULE("KopernicusSolarPanel") AND p:GETMODULE("KopernicusSolarPanel"):HASEVENT("extend solar panel") {
-            deployableSolarPanelsStageTwo:PUSH(p).
-        }
-    }
-
-    // Find all the deployable antennas on stage two. These get deployed at the
-    // same time as the stage-two solar panels.
-
-    FOR p IN allParts {
-        IF p:STAGE = kspS2StageNumber - 1 AND p:HASMODULE("ModuleDeployableAntenna") AND p:GETMODULE("ModuleDeployableAntenna"):HASEVENT("extend antenna") {
-            deployableAntennasStageTwo:PUSH(p).
+        IF i:HASMODULE("ProceduralFairingDecoupler") AND i:GETMODULE("ProceduralFairingDecoupler"):HASEVENT("jettison fairing") {
+            payloadFairingsAll:PUSH(i).
         }
     }
 
@@ -559,6 +554,7 @@ DECLARE GLOBAL FUNCTION ModeS1IgnitionLoopFunction {
 
     IF STAGE:READY {
         STAGE.
+        SET currentStage TO 1.
         SET StateFunction TO ModeS1IgnitionTransitionOutFunction@.
         RETURN.
     }
@@ -707,7 +703,7 @@ DECLARE GLOBAL FUNCTION ModeRollProgramLoopFunction {
     // determined pretty much empirically.
 
     IF SHIP:AIRSPEED > 50.0 {
-        SET StateFunction TO ModeS1PitchProgramTransitionInFunction@.
+        SET StateFunction TO ModePitchProgramTransitionInFunction@.
         RETURN.
     }
 
@@ -723,7 +719,7 @@ DECLARE GLOBAL FUNCTION ModeRollProgramLoopFunction {
 // }
 
 ////////////////////////////////////////////////////////////////////////////////
-// MODE S1 PITCH PROGRAM ///////////////////////////////////////////////////////
+// MODE PITCH PROGRAM //////////////////////////////////////////////////////////
 ////////////////////////////////////////////////////////////////////////////////
 
 // During the pitch program we command the vehicle to pitch down (toward the
@@ -731,8 +727,8 @@ DECLARE GLOBAL FUNCTION ModeRollProgramLoopFunction {
 // function of altitude: θ = altitudeⁿ, where altitude is represented as a
 // fraction of the pitch program end altitude.
 
-DECLARE GLOBAL FUNCTION ModeS1PitchProgramTransitionInFunction {
-    SET ModeName TO "S1 PITCH PROGRAM".
+DECLARE GLOBAL FUNCTION ModePitchProgramTransitionInFunction {
+    SET ModeName TO "PITCH PROGRAM".
     MissionLog("MODE TO " + ModeName).
 
     SET controlPitch TO MAX( 0.0, 90.0 - 90.0 * (SHIP:ALTITUDE / pitchProgramEndAltitude) ^ pitchProgramExponent ).
@@ -746,32 +742,16 @@ DECLARE GLOBAL FUNCTION ModeS1PitchProgramTransitionInFunction {
 
     StartTimeWarp().
 
-    SET StateFunction TO ModeS1PitchProgramLoopFunction@.
+    SET StateFunction TO ModePitchProgramLoopFunction@.
     RETURN.
 }
 
-DECLARE GLOBAL FUNCTION ModeS1PitchProgramLoopFunction {
-
-    SET controlPitch TO MAX( 0.0, 90.0 - 90.0 * (SHIP:ALTITUDE / pitchProgramEndAltitude) ^ pitchProgramExponent ).
-
-    SET gForceLimit TO ( 1.5 * ( 1.0 - (90.0 - controlPitch)/90.0) ) + ( 2.0 * ((90.0 - controlPitch)/90.0) ).
-    SET throttlePIDController:MAXOUTPUT TO MIN(1.0, MAX(0.0, (SHIP:MASS * (gForceLimit * CONSTANT:g0 - flightState_FD_long)) - flightState_ΣF_l)/flightState_ΣF_t).
-    SET controlThrottle TO throttlePIDController:UPDATE(TIME:SECONDS, ETA:APOAPSIS).
-
-    IF SHIP:ALTITUDE >= pitchProgramEndAltitude {
-        SET StateFunction TO ModeS1ShutdownTransitionInFunction@.
-        RETURN.
-    }
-
-    IF SHIP:MAXTHRUST = 0 {
-        SET StateFunction TO ModeS1ShutdownTransitionInFunction@.
-        RETURN.
-    }
+DECLARE GLOBAL FUNCTION ModePitchProgramLoopFunction {
 
     // Trigger fairing jettison if we're past max. Q AND we're at the threshold
     // dynamic pressure.
 
-    IF payloadFairingsAll:LENGTH > 0 AND SHIP:Q < flightState_MaxQ AND SHIP:Q < fairingJettisonQ {
+    IF NOT payloadFairingsAll:EMPTY AND SHIP:Q < flightState_MaxQ AND SHIP:Q < fairingJettisonQ {
 
         MissionLog("FAIRING JETTISON").
 
@@ -786,13 +766,54 @@ DECLARE GLOBAL FUNCTION ModeS1PitchProgramLoopFunction {
         }
     }
 
+    IF currentStage = 1 AND SHIP:MAXTHRUST = 0 {
+        SET StateFunction TO ModeS1ShutdownTransitionInFunction@.
+        RETURN.
+    }
+
+    IF currentStage = 2 AND SHIP:MAXTHRUST = 0 {
+        SET StateFunction TO ModeS2ShutdownTransitionInFunction@.
+        RETURN.
+    }
+
+    IF currentStage = 1 AND SHIP:ALTITUDE >= pitchProgramEndAltitude AND stageTwoExists {
+        SET StateFunction TO ModeS1ShutdownTransitionInFunction@.
+        RETURN.
+    }
+
+    IF currentStage = 1 AND SHIP:ALTITUDE >= pitchProgramEndAltitude AND SHIP:APOAPSIS < launchToApoapsis AND NOT stageTwoExists {
+        SET StateFunction TO ModeRaiseApoapsisTransitionInFunction@.
+        RETURN.
+    }
+
+    IF currentStage = 1 AND SHIP:ALTITUDE >= pitchProgramEndAltitude AND SHIP:APOAPSIS >= launchToApoapsis AND NOT stageTwoExists {
+        SET StateFunction TO ModePoweredCoastTransitionInFunction@.
+        RETURN.
+    }
+
+    IF currentStage = 2 AND SHIP:ALTITUDE >= pitchProgramEndAltitude AND SHIP:APOAPSIS >= launchToApoapsis {
+        SET StateFunction TO ModePoweredCoastTransitionInFunction@.
+        RETURN.
+    }
+
+    IF currentStage = 2 AND SHIP:ALTITUDE < pitchProgramEndAltitude AND SHIP:APOAPSIS >= launchToApoapsis {
+        SET StateFunction TO ModePoweredCoastTransitionInFunction@.
+        RETURN.
+    }
+
+    SET controlPitch TO MAX( 0.0, 90.0 - 90.0 * (SHIP:ALTITUDE / pitchProgramEndAltitude) ^ pitchProgramExponent ).
+
+    SET gForceLimit TO ( 1.5 * ( 1.0 - (90.0 - controlPitch)/90.0) ) + ( 2.0 * ((90.0 - controlPitch)/90.0) ).
+    SET throttlePIDController:MAXOUTPUT TO MIN(1.0, MAX(0.0, (SHIP:MASS * (gForceLimit * CONSTANT:g0 - flightState_FD_long)) - flightState_ΣF_l)/flightState_ΣF_t).
+    SET controlThrottle TO throttlePIDController:UPDATE(TIME:SECONDS, ETA:APOAPSIS).
+
     // If ANY of the side-booster engines flames out, shut down all the engines
     // and jettison the boosters. This may result in a failed launch if the
     // vehicle doesn't have enough Δv in the core and second stages to make up
     // the difference, but it's better than just letting the vehicle spin out
     // of control.
 
-    IF enginesStageOneParallelAll:LENGTH > 0 AND STAGE:READY {
+    IF currentStage = 1 AND stageOneSideBoosterExists AND STAGE:READY {
 
         FOR e IN enginesStageOneParallelAll {
             IF NOT e:IGNITION OR e:FLAMEOUT {
@@ -809,7 +830,7 @@ DECLARE GLOBAL FUNCTION ModeS1PitchProgramLoopFunction {
 
 // Not currently used.
 
-// DECLARE GLOBAL FUNCTION ModeS1PitchProgramTransitionOutFunction {
+// DECLARE GLOBAL FUNCTION ModePitchProgramTransitionOutFunction {
 //
 //     SET StateFunction TO {}.
 //     RETURN.
@@ -920,20 +941,38 @@ DECLARE GLOBAL FUNCTION ModeSideBoosterSeparationLoopFunction {
     SET controlPitch TO MAX( 0.0, 90.0 - 90.0 * (SHIP:ALTITUDE / pitchProgramEndAltitude) ^ pitchProgramExponent ).
 
     IF TIME:SECONDS - register1:SECONDS >= 2.0 {
-        SET StateFunction TO ModeS1PitchProgramTransitionInFunction@.
+        SET StateFunction TO ModeSideBoosterSeparationTransitionOutFunction@.
         RETURN.
     }
 
     RETURN.
 }
 
-// Not currently used.
+DECLARE GLOBAL FUNCTION ModeSideBoosterSeparationTransitionOutFunction {
 
-// DECLARE GLOBAL FUNCTION ModeSideBoosterSeparationTransitionOutFunction {
-//
-//     SET StateFunction TO {}.
-//     RETURN.
-// }
+    // Our payload fairings may have been jettisoned at side-booster separation.
+    // Re-scan the part tree and rebuild the list just in case.
+
+    IF NOT payloadFairingsAll:EMPTY {
+
+        payloadFairingsAll:CLEAR().
+
+        DECLARE LOCAL allParts IS LIST().
+        LIST PARTS in allParts.
+
+        FOR p IN allParts {
+            IF p:HASMODULE("ModuleProceduralFairing") AND p:GETMODULE("ModuleProceduralFairing"):HASEVENT("deploy") {
+                payloadFairingsAll:PUSH(p).
+            }
+            IF p:HASMODULE("ProceduralFairingDecoupler") AND p:GETMODULE("ProceduralFairingDecoupler"):HASEVENT("jettison fairing") {
+                payloadFairingsAll:PUSH(p).
+            }
+        }
+    }
+
+    SET StateFunction TO ModePitchProgramTransitionInFunction@.
+    RETURN.
+}
 
 ////////////////////////////////////////////////////////////////////////////////
 // MODE S1 SHUTDOWN ////////////////////////////////////////////////////////////
@@ -962,8 +1001,23 @@ DECLARE GLOBAL FUNCTION ModeS1ShutdownTransitionInFunction {
 DECLARE GLOBAL FUNCTION ModeS1ShutdownLoopFunction {
 
     IF THROTTLE = 0.0 AND TIME:SECONDS >= register1:SECONDS + 2.0 {
-        SET StateFunction TO ModeS2SeparationTransitionInFunction@.
-        RETURN.
+
+        IF stageTwoExists {
+            SET StateFunction TO ModeS2SeparationTransitionInFunction@.
+            RETURN.
+        }
+
+        IF SHIP:ALTITUDE < SHIP:BODY:ATM:HEIGHT AND SHIP:APOAPSIS >= launchToApoapsis {
+            SET StateFunction TO ModePoweredCoastTransitionInFunction@.
+            RETURN.
+        }
+
+        IF SHIP:ALTITUDE >= SHIP:BODY:ATM:HEIGHT AND SHIP:APOAPSIS >= launchToApoapsis {
+            SET StateFunction TO ModeComputeApoapsisManeuverTransitionInFunction@.
+            RETURN.
+        }
+
+        SET StateFunction TO ModeEndProgramTransitionInFunction@.
     }
 
     RETURN.
@@ -1038,7 +1092,7 @@ DECLARE GLOBAL FUNCTION ModeS2SeparationTransitionOutFunction {
     // Our payload fairings may have been jettisoned at S2 separation. Re-scan
     // the part tree and rebuild the list just in case.
 
-    IF payloadFairingsAll:LENGTH > 0 {
+    IF NOT payloadFairingsAll:EMPTY {
 
         payloadFairingsAll:CLEAR().
 
@@ -1093,6 +1147,7 @@ DECLARE GLOBAL FUNCTION ModeS2IgnitionLoopFunction {
 
     IF STAGE:READY {
         STAGE.
+        SET currentStage TO 2.
         SET StateFunction TO ModeS2IgnitionTransitionOutFunction@.
         RETURN.
     }
@@ -1126,52 +1181,10 @@ DECLARE GLOBAL FUNCTION ModeS2IgnitionTransitionOutFunction {
         }
     }
 
-    IF SHIP:ALTITUDE >= pitchProgramEndAltitude AND SHIP:APOAPSIS < launchToApoapsis {
-        SET StateFunction TO ModeRaiseApoapsisTransitionInFunction@.
-        RETURN.
-    }
-
     IF SHIP:ALTITUDE < pitchProgramEndAltitude {
-        SET StateFunction TO ModeS2PitchProgramTransitionInFunction@.
+        SET StateFunction TO ModePitchProgramTransitionInFunction@.
         RETURN.
     }
-
-    IF SHIP:ALTITUDE >= pitchProgramEndAltitude AND SHIP:APOAPSIS >= launchToApoapsis {
-        SET StateFunction TO ModePoweredCoastTransitionInFunction@.
-        RETURN.
-    }
-
-    RETURN.
-}
-
-////////////////////////////////////////////////////////////////////////////////
-// MODE S2 PITCH PROGRAM ///////////////////////////////////////////////////////
-////////////////////////////////////////////////////////////////////////////////
-
-// This is a contingency mode. In nominal flight, stage one carries us all the
-// way through the pitch program. This mode is for when stage one burns out
-// early, leaving stage two to complete the pitch program before moving on.
-
-DECLARE GLOBAL FUNCTION ModeS2PitchProgramTransitionInFunction {
-    SET ModeName TO "S2 PITCH PROGRAM".
-    MissionLog("MODE TO " + ModeName).
-
-    SET controlPitch TO MAX( 0.0, 90.0 - 90.0 * (SHIP:ALTITUDE / pitchProgramEndAltitude) ^ pitchProgramExponent ).
-    LOCK STEERING TO HEADING(launchAzimuth, controlPitch).
-
-    SET gForceLimit TO ( 1.5 * ( 1.0 - (90.0 - controlPitch)/90.0) ) + ( 2.0 * ((90.0 - controlPitch)/90.0) ).
-    SET throttlePIDController:SETPOINT TO targetTimeToApoapsis.
-    SET throttlePIDController:MAXOUTPUT TO MIN(1.0, MAX(0.0, (SHIP:MASS * (gForceLimit * CONSTANT:g0 - flightState_FD_long)) - flightState_ΣF_l)/flightState_ΣF_t).
-    SET controlThrottle TO throttlePIDController:UPDATE(TIME:SECONDS, ETA:APOAPSIS).
-    LOCK THROTTLE TO controlThrottle.
-
-    StartTimeWarp().
-
-    SET StateFunction TO ModeS2PitchProgramLoopFunction@.
-    RETURN.
-}
-
-DECLARE GLOBAL FUNCTION ModeS2PitchProgramLoopFunction {
 
     IF SHIP:ALTITUDE >= pitchProgramEndAltitude AND SHIP:APOAPSIS < launchToApoapsis {
         SET StateFunction TO ModeRaiseApoapsisTransitionInFunction@.
@@ -1183,46 +1196,8 @@ DECLARE GLOBAL FUNCTION ModeS2PitchProgramLoopFunction {
         RETURN.
     }
 
-    IF SHIP:ALTITUDE < pitchProgramEndAltitude AND SHIP:APOAPSIS >= launchToApoapsis {
-        SET StateFunction TO ModePoweredCoastTransitionInFunction@.
-        RETURN.
-    }
-
-    IF payloadFairingsAll:LENGTH > 0 AND SHIP:Q < flightState_MaxQ AND SHIP:Q < fairingJettisonQ {
-
-        MissionLog("FAIRING JETTISON").
-
-        UNTIL payloadFairingsAll:EMPTY {
-            DECLARE LOCAL f IS payloadFairingsAll:POP().
-            IF f:HASMODULE("ModuleProceduralFairing") {
-                IF f:GETMODULE("ModuleProceduralFairing"):HASEVENT("deploy") {
-                    f:GETMODULE("ModuleProceduralFairing"):DOEVENT("deploy").
-                }
-            }
-            IF f:HASMODULE("ProceduralFairingDecoupler") {
-                IF f:GETMODULE("ProceduralFairingDecoupler"):HASEVENT("jettison fairing") {
-                    f:GETMODULE("ProceduralFairingDecoupler"):DOEVENT("jettison fairing").
-                }
-            }
-        }
-    }
-
-    SET controlPitch TO MAX( 0.0, 90.0 - 90.0 * (SHIP:ALTITUDE / pitchProgramEndAltitude) ^ pitchProgramExponent ).
-
-    SET gForceLimit TO ( 1.5 * ( 1.0 - (90.0 - controlPitch)/90.0) ) + ( 2.0 * ((90.0 - controlPitch)/90.0) ).
-    SET throttlePIDController:MAXOUTPUT TO MIN(1.0, MAX(0.0, (SHIP:MASS * (gForceLimit * CONSTANT:g0 - flightState_FD_long)) - flightState_ΣF_l)/flightState_ΣF_t).
-    SET controlThrottle TO throttlePIDController:UPDATE(TIME:SECONDS, ETA:APOAPSIS).
-
     RETURN.
 }
-
-// Not currently used.
-
-// DECLARE GLOBAL FUNCTION ModeS2PitchProgramTransitionOutFunction {
-//
-//     SET StateFunction TO {}.
-//     RETURN.
-// }
 
 ////////////////////////////////////////////////////////////////////////////////
 // MODE RAISE APOAPSIS /////////////////////////////////////////////////////////
@@ -1254,9 +1229,42 @@ DECLARE GLOBAL FUNCTION ModeRaiseApoapsisTransitionInFunction {
 
 DECLARE GLOBAL FUNCTION ModeRaiseApoapsisLoopFunction {
 
-    IF SHIP:APOAPSIS >= launchToApoapsis {
+    IF currentStage = 1 AND SHIP:MAXTHRUST = 0 {
+        SET StateFunction TO ModeS1ShutdownTransitionInFunction@.
+        RETURN.
+    }
+
+    IF currentStage = 2 AND SHIP:MAXTHRUST = 0 {
         SET StateFunction TO ModeS2ShutdownTransitionInFunction@.
         RETURN.
+    }
+
+    IF currentStage = 1 AND SHIP:APOAPSIS >= launchToApoapsis {
+        SET StateFunction TO ModeS1ShutdownTransitionInFunction@.
+        RETURN.
+    }
+
+    IF currentStage = 2 AND SHIP:APOAPSIS >= launchToApoapsis {
+        SET StateFunction TO ModeS2ShutdownTransitionInFunction@.
+        RETURN.
+    }
+
+    // Trigger fairing jettison if we're past max. Q AND we're at the threshold
+    // dynamic pressure.
+
+    IF NOT payloadFairingsAll:EMPTY AND SHIP:Q < flightState_MaxQ AND SHIP:Q < fairingJettisonQ {
+
+        MissionLog("FAIRING JETTISON").
+
+        UNTIL payloadFairingsAll:EMPTY {
+            DECLARE LOCAL f IS payloadFairingsAll:POP().
+            IF f:HASMODULE("ModuleProceduralFairing") {
+                f:GETMODULE("ModuleProceduralFairing"):DOEVENT("deploy").
+            }
+            IF f:HASMODULE("ProceduralFairingDecoupler") {
+                f:GETMODULE("ProceduralFairingDecoupler"):DOEVENT("jettison fairing").
+            }
+        }
     }
 
     // This puts us into an attitude where we're pointed in the same direction
@@ -1298,35 +1306,6 @@ DECLARE GLOBAL FUNCTION ModeS2ShutdownTransitionInFunction {
 
     SET register1 TO TIME.
 
-    // Order the deployment of any stage-two solar panels. We don't wait for
-    // them to fully deploy; we just assume they will deploy successfully.
-
-    IF NOT deployableSolarPanelsStageTwo:EMPTY {
-        MissionLog("SOLAR PANEL DEPLOY").
-    }
-    UNTIL deployableSolarPanelsStageTwo:EMPTY {
-        DECLARE LOCAL p IS deployableSolarPanelsStageTwo:POP().
-        IF p:HASMODULE("ModuleDeployableSolarPanel") AND p:GETMODULE("ModuleDeployableSolarPanel"):HASEVENT("extend solar panel") {
-            p:GETMODULE("ModuleDeployableSolarPanel"):DOEVENT("extend solar panel").
-        }
-        IF p:HASMODULE("KopernicusSolarPanel") AND p:GETMODULE("KopernicusSolarPanel"):HASEVENT("extend solar panel") {
-            p:GETMODULE("KopernicusSolarPanel"):DOEVENT("extend solar panel").
-        }
-    }
-
-    // Same thing for any antennas on stage two: We just assume they're going to
-    // deploy successfully once ordered.
-
-    IF NOT deployableAntennasStageTwo:EMPTY {
-        MissionLog("ANTENNA DEPLOY").
-    }
-    UNTIL deployableAntennasStageTwo:EMPTY {
-        DECLARE LOCAL p IS deployableAntennasStageTwo:POP().
-        IF p:HASMODULE("ModuleDeployableAntenna") AND p:GETMODULE("ModuleDeployableAntenna"):HASEVENT("extend antenna") {
-            p:GETMODULE("ModuleDeployableAntenna"):DOEVENT("extend antenna").
-        }
-    }
-
     SET StateFunction TO ModeS2ShutdownLoopFunction@.
     RETURN.
 }
@@ -1335,15 +1314,22 @@ DECLARE GLOBAL FUNCTION ModeS2ShutdownLoopFunction {
 
     IF THROTTLE = 0.0 AND TIME:SECONDS >= register1:SECONDS + 2.0 {
 
-        IF SHIP:ALTITUDE < SHIP:BODY:ATM:HEIGHT {
+        IF SHIP:APOAPSIS < launchToApoapsis {
+            SET StateFunction TO ModeEndProgramTransitionInFunction@.
+            RETURN.
+        }
+
+        IF SHIP:APOAPSIS >= launchToApoapsis AND SHIP:ALTITUDE < SHIP:BODY:ATM:HEIGHT {
             SET StateFunction TO ModePoweredCoastTransitionInFunction@.
             RETURN.
         }
 
-        IF SHIP:ALTITUDE >= SHIP:BODY:ATM:HEIGHT {
+        IF SHIP:APOAPSIS >= launchToApoapsis AND SHIP:ALTITUDE >= SHIP:BODY:ATM:HEIGHT {
             SET StateFunction TO ModeComputeApoapsisManeuverTransitionInFunction@.
             RETURN.
         }
+
+        SET StateFunction TO ModeEndProgramTransitionInFunction@.
     }
 
     RETURN.
@@ -1376,6 +1362,8 @@ DECLARE GLOBAL FUNCTION ModePoweredCoastTransitionInFunction {
     SET controlThrottle TO 0.0.
     LOCK THROTTLE TO controlThrottle.
 
+    PANELS ON.
+
     RCS ON.
     SET rcsForePIDController:SETPOINT TO launchToApoapsis.
     SET SHIP:CONTROL:FORE TO rcsForePIDController:UPDATE(TIME:SECONDS, ALT:APOAPSIS).
@@ -1391,6 +1379,24 @@ DECLARE GLOBAL FUNCTION ModePoweredCoastLoopFunction {
     IF SHIP:ALTITUDE >= SHIP:BODY:ATM:HEIGHT {
         SET StateFunction TO ModePoweredCoastTransitionOutFunction@.
         RETURN.
+    }
+
+    // Trigger fairing jettison if we're past max. Q AND we're at the threshold
+    // dynamic pressure.
+
+    IF NOT payloadFairingsAll:EMPTY AND SHIP:Q < flightState_MaxQ AND SHIP:Q < fairingJettisonQ {
+
+        MissionLog("FAIRING JETTISON").
+
+        UNTIL payloadFairingsAll:EMPTY {
+            DECLARE LOCAL f IS payloadFairingsAll:POP().
+            IF f:HASMODULE("ModuleProceduralFairing") {
+                f:GETMODULE("ModuleProceduralFairing"):DOEVENT("deploy").
+            }
+            IF f:HASMODULE("ProceduralFairingDecoupler") {
+                f:GETMODULE("ProceduralFairingDecoupler"):DOEVENT("jettison fairing").
+            }
+        }
     }
 
     SET SHIP:CONTROL:FORE TO rcsForePIDController:UPDATE(TIME:SECONDS, ALT:APOAPSIS).
@@ -1422,6 +1428,8 @@ DECLARE GLOBAL FUNCTION ModeComputeApoapsisManeuverTransitionInFunction {
     SET ModeName TO "COMPUTE APOAPSIS MANEUVER".
     MissionLog("MODE TO " + ModeName).
 
+    PANELS ON.
+
     DECLARE LOCAL v1 IS SQRT( SHIP:BODY:MU * ( (2/(SHIP:BODY:RADIUS + ALT:APOAPSIS)) - (1/SHIP:ORBIT:SEMIMAJORAXIS) ) ).
     DECLARE LOCAL v2 IS SQRT( SHIP:BODY:MU * ( (2/(SHIP:BODY:RADIUS + ALT:APOAPSIS)) - (1/launchToSemimajorAxis) ) ).
     DECLARE LOCAL Δv IS v2 - v1.
@@ -1429,13 +1437,48 @@ DECLARE GLOBAL FUNCTION ModeComputeApoapsisManeuverTransitionInFunction {
     DECLARE LOCAL apoapsisManeuver TO NODE( TIME:SECONDS + ETA:APOAPSIS, 0.0, 0.0, Δv).
     ADD apoapsisManeuver.
 
-    SET StateFunction TO ModeEndProgramTransitionInFunction@.
+    SET StateFunction TO ModeNullRatesTransitionInFunction@.
     RETURN.
 }
 
 // Not currently used.
 
 // DECLARE GLOBAL FUNCTION ModeComputeApoapsisManeuverTransitionOutFunction {
+//
+//     SET StateFunction TO {}.
+//     RETURN.
+// }
+
+////////////////////////////////////////////////////////////////////////////////
+// MODE NULL RATES /////////////////////////////////////////////////////////////
+////////////////////////////////////////////////////////////////////////////////
+
+DECLARE GLOBAL FUNCTION ModeNullRatesTransitionInFunction {
+    SET ModeName TO "NULL RATES".
+    MissionLog("MODE TO " + ModeName).
+
+    SET SHIP:CONTROL:NEUTRALIZE TO TRUE.
+    LOCK THROTTLE TO 0.0.
+    LOCK STEERING TO "KILL".
+
+    SET StateFunction TO ModeNullRatesLoopFunction@.
+    RETURN.
+}
+
+DECLARE GLOBAL FUNCTION ModeNullRatesLoopFunction {
+
+    // How about NOT spinning out of control?
+
+    IF SHIP:ANGULARVEL:MAG < 0.010 {
+
+        SET StateFunction TO ModeEndProgramTransitionInFunction@.
+        RETURN.
+    }
+}
+
+// Not currently used.
+
+// DECLARE GLOBAL FUNCTION ModeNullRatesTransitionOutFunction {
 //
 //     SET StateFunction TO {}.
 //     RETURN.
@@ -1449,31 +1492,10 @@ DECLARE GLOBAL FUNCTION ModeEndProgramTransitionInFunction {
     SET ModeName TO "END PROGRAM".
     MissionLog("MODE TO " + ModeName).
 
+    UNLOCK THROTTLE.
+    UNLOCK STEERING.
     SET SHIP:CONTROL:NEUTRALIZE TO TRUE.
-    LOCK THROTTLE TO 0.0.
-    LOCK STEERING TO "KILL".
-
-    SET StateFunction TO ModeEndProgramLoopFunction@.
-    RETURN.
-}
-
-DECLARE GLOBAL FUNCTION ModeEndProgramLoopFunction {
-
-    // How about NOT spinning out of control?
-
-    IF SHIP:ANGULARVEL:MAG < 0.010 {
-        UNLOCK THROTTLE.
-        UNLOCK STEERING.
-        SET RCS TO initialRCSState.
-
-        SET StateFunction TO ModeEndProgramTransitionOutFunction@.
-        RETURN.
-    }
-
-    RETURN.
-}
-
-DECLARE GLOBAL FUNCTION ModeEndProgramTransitionOutFunction {
+    SET RCS TO initialRCSState.
 
     MissionLog("CTRL-C TO END PROGRAM").
 
@@ -1485,14 +1507,30 @@ DECLARE GLOBAL FUNCTION ModeEndProgramTransitionOutFunction {
     RETURN.
 }
 
+// Not currently used.
+
+// DECLARE GLOBAL FUNCTION ModeEndProgramLoopFunction {
+//
+//     SET StateFunction TO {}.
+//     RETURN.
+// }
+
+// Not currently used.
+
+// DECLARE GLOBAL FUNCTION ModeEndProgramTransitionOutFunction {
+//
+//     SET StateFunction TO {}.
+//     RETURN.
+// }
+
 ////////////////////////////////////////////////////////////////////////////////
 //// TIMEWARP CONTROL                                                       ////
 ////////////////////////////////////////////////////////////////////////////////
 
 DECLARE GLOBAL FUNCTION StartTimeWarp {
-    IF useTimeWarp AND KUNIVERSE:TIMEWARP:RATE <> 2.0 {
+    IF useTimeWarp AND KUNIVERSE:TIMEWARP:RATE <> 4.0 {
         SET KUNIVERSE:TIMEWARP:MODE TO "PHYSICS".
-        SET KUNIVERSE:TIMEWARP:RATE TO 2.0.
+        SET KUNIVERSE:TIMEWARP:RATE TO 4.0.
     }
 }
 
