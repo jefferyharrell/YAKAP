@@ -791,6 +791,11 @@ DECLARE GLOBAL FUNCTION ModePitchProgramLoopFunction {
         RETURN.
     }
 
+    IF currentStage = 2 AND SHIP:ALTITUDE >= pitchProgramEndAltitude AND SHIP:APOAPSIS < launchToApoapsis {
+        SET StateFunction TO ModeRaiseApoapsisTransitionInFunction@.
+        RETURN.
+    }
+
     IF currentStage = 2 AND SHIP:ALTITUDE >= pitchProgramEndAltitude AND SHIP:APOAPSIS >= launchToApoapsis {
         SET StateFunction TO ModePoweredCoastTransitionInFunction@.
         RETURN.
