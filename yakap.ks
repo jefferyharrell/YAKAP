@@ -1665,6 +1665,22 @@ DECLARE GLOBAL FUNCTION MissionDebug {
 }
 
 ////////////////////////////////////////////////////////////////////////////////
+//// ABORT                                                                  ////
+////////////////////////////////////////////////////////////////////////////////
+
+ON ABORT {
+
+    StopTimeWarp().
+
+    DECLARE LOCAL selfDestructModules IS SHIP:MODULESNAMED("TacSelfDestruct").
+    IF NOT selfDestructModules:EMPTY AND selfDestructModules[0]:HASEVENT("self destruct!") {
+        MissionLog("ABORT").
+        selfDestructModules[0]:DOEVENT("self destruct!").
+    }
+
+}
+
+////////////////////////////////////////////////////////////////////////////////
 //// MAIN LOOP                                                              ////
 ////////////////////////////////////////////////////////////////////////////////
 
