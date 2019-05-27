@@ -1528,9 +1528,9 @@ DECLARE GLOBAL FUNCTION ModeEndProgramTransitionInFunction {
 ////////////////////////////////////////////////////////////////////////////////
 
 DECLARE GLOBAL FUNCTION StartTimeWarp {
-    IF useTimeWarp AND KUNIVERSE:TIMEWARP:RATE <> 4.0 {
+    IF useTimeWarp AND KUNIVERSE:TIMEWARP:RATE <> 2.0 {
         SET KUNIVERSE:TIMEWARP:MODE TO "PHYSICS".
-        SET KUNIVERSE:TIMEWARP:RATE TO 4.0.
+        SET KUNIVERSE:TIMEWARP:RATE TO 2.0.
     }
 }
 
