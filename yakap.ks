@@ -1590,9 +1590,7 @@ DECLARE GLOBAL FUNCTION StartTimeWarp {
 }
 
 DECLARE GLOBAL FUNCTION StopTimeWarp {
-    IF useTimeWarp AND KUNIVERSE:TIMEWARP:RATE <> 1.0 {
-        KUNIVERSE:TIMEWARP:CANCELWARP().
-    }
+    KUNIVERSE:TIMEWARP:CANCELWARP().
 }
 
 ////////////////////////////////////////////////////////////////////////////////
