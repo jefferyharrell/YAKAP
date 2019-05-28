@@ -47,6 +47,11 @@ DECLARE GLOBAL targetTimeToApoapsis              IS 45.0.
 // Dynamic pressure, in atmospheres, at which to jettison the payload fairings.
 DECLARE GLOBAL fairingJettisonQ                  IS  0.001.
 
+// Dynamic pressure, in atmospheres, at which to jettison the launch escape
+// system. There's no good reason why this should be different from
+// fairingJettisonQ, but what the heck.
+DECLARE GLOBAL lesJettisonQ                      IS  0.001.
+
 ////////////////////////////////////////////////////////////////////////////////
 //// INTERNAL VARIABLES                                                     ////
 ////////////////////////////////////////////////////////////////////////////////
@@ -94,6 +99,8 @@ DECLARE GLOBAL enginesStageTwoAllThrottleable    IS LIST().
 DECLARE GLOBAL enginesStageTwoAllThrottleLocked  IS LIST().
 
 DECLARE GLOBAL payloadFairingsAll                IS QUEUE().
+
+DECLARE GLOBAL launchEscapeSystemPartModule      IS 0.
 
 DECLARE GLOBAL enginesRunningAllThrottleable     IS LIST().
 DECLARE GLOBAL enginesRunningAllThrottleLocked   IS LIST().
@@ -171,7 +178,7 @@ DECLARE GLOBAL FUNCTION InitializeFlightState {
 
     LIST SENSORS IN allSensors.
     FOR s in allSensors {
-        IF s:TYPE = "ACC" {
+        IF s:HASSUFFIX("TYPE") AND s:TYPE = "ACC" {
             LOCK accelerometerReading TO SHIP:SENSORS:ACC.
             BREAK.
         }
@@ -490,6 +497,16 @@ DECLARE GLOBAL FUNCTION ModePrelaunchTransitionInFunction {
         }
     }
 
+    // Is there a launch escape system part on this vehicle? Note that if
+    // there's more than one LES, we only pay attention to the first one we
+    // find. This should be okay because any vehicle with more than one LES
+    // is purely pathological.
+
+    DECLARE LOCAL lesModules IS SHIP:MODULESNAMED("ModulePebkacLesController2").
+    IF NOT lesModules:EMPTY {
+        SET launchEscapeSystemPartModule TO lesModules[0].
+    }
+
     ////////////////////////////////////////////////////////////////////////////
 
     SET StateFunction TO ModeS1IgnitionTransitionInFunction@.
@@ -763,6 +780,17 @@ DECLARE GLOBAL FUNCTION ModePitchProgramLoopFunction {
             IF f:HASMODULE("ProceduralFairingDecoupler") {
                 f:GETMODULE("ProceduralFairingDecoupler"):DOEVENT("jettison fairing").
             }
+        }
+    }
+
+    // Trigger LES jettison if we're past max. Q AND we're at the threshold
+    // dynamic pressure.
+
+    IF SHIP:Q < flightState_MaxQ AND SHIP:Q < lesJettisonQ AND launchEscapeSystemPartModule <> 0 AND launchEscapeSystemPartModule:PART:SHIP = SHIP {
+        IF launchEscapeSystemPartModule:HASEVENT("jettison les") {
+            MissionLog("LES JETTISON").
+            launchEscapeSystemPartModule:DOEVENT("jettison les").
+            SET launchEscapeSystemPartModule TO 0.
         }
     }
 
@@ -1272,6 +1300,17 @@ DECLARE GLOBAL FUNCTION ModeRaiseApoapsisLoopFunction {
         }
     }
 
+    // Trigger LES jettison if we're past max. Q AND we're at the threshold
+    // dynamic pressure.
+
+    IF SHIP:Q < flightState_MaxQ AND SHIP:Q < lesJettisonQ AND launchEscapeSystemPartModule <> 0 AND launchEscapeSystemPartModule:PART:SHIP = SHIP {
+        IF launchEscapeSystemPartModule:HASEVENT("jettison les") {
+            MissionLog("LES JETTISON").
+            launchEscapeSystemPartModule:DOEVENT("jettison les").
+            SET launchEscapeSystemPartModule TO 0.
+        }
+    }
+
     // This puts us into an attitude where we're pointed in the same direction
     // as orbit prograde, but pointed at the horizon. This keeps us from burning
     // "up" and raising our apoapsis too quickly.
@@ -1404,6 +1443,17 @@ DECLARE GLOBAL FUNCTION ModePoweredCoastLoopFunction {
         }
     }
 
+    // Trigger LES jettison if we're past max. Q AND we're at the threshold
+    // dynamic pressure.
+
+    IF SHIP:Q < flightState_MaxQ AND SHIP:Q < lesJettisonQ AND launchEscapeSystemPartModule <> 0 AND launchEscapeSystemPartModule:PART:SHIP = SHIP {
+        IF launchEscapeSystemPartModule:HASEVENT("jettison les") {
+            MissionLog("LES JETTISON").
+            launchEscapeSystemPartModule:DOEVENT("jettison les").
+            SET launchEscapeSystemPartModule TO 0.
+        }
+    }
+
     SET SHIP:CONTROL:FORE TO rcsForePIDController:UPDATE(TIME:SECONDS, ALT:APOAPSIS).
 
     RETURN.
@@ -1504,7 +1554,7 @@ DECLARE GLOBAL FUNCTION ModeEndProgramTransitionInFunction {
 
     MissionLog("CTRL-C TO END PROGRAM").
 
-    IF pauseGameWhenFinished {
+    IF pauseGameWhenFinished AND NOT ABORT {
         KUNIVERSE:PAUSE().
     }
 
@@ -1670,12 +1720,73 @@ DECLARE GLOBAL FUNCTION MissionDebug {
 
 ON ABORT {
 
-    StopTimeWarp().
+    SET StateFunction TO ModeEndProgramTransitionInFunction@.
 
-    DECLARE LOCAL selfDestructModules IS SHIP:MODULESNAMED("TacSelfDestruct").
-    IF NOT selfDestructModules:EMPTY AND selfDestructModules[0]:HASEVENT("self destruct!") {
+    IF launchEscapeSystemPartModule <> 0 AND launchEscapeSystemPartModule:PART:SHIP = SHIP {
+
+        StopTimeWarp().
         MissionLog("ABORT").
-        selfDestructModules[0]:DOEVENT("self destruct!").
+
+        UNLOCK THROTTLE.
+        UNLOCK STEERING.
+        SET SHIP:CONTROL:NEUTRALIZE TO TRUE.
+        SET RCS TO initialRCSState.
+
+        enginesRunningAllThrottleable:CLEAR().
+        enginesRunningAllThrottleLocked:CLEAR().
+
+        // Fire EVERY decoupler on the vehicle.
+
+        DECLARE LOCAL allParts IS LIST().
+        LIST PARTS IN allParts.
+
+        FOR i IN allParts {
+            IF i:HASMODULE("ModuleDecouple") AND NOT i:HASMODULE("ModulePebkacLesController2") {
+                IF i:SHIP = SHIP AND i:GETMODULE("ModuleDecouple"):HASEVENT("decouple") {
+                    i:GETMODULE("ModuleDecouple"):DOEVENT("decouple").
+                }
+            }
+        }
+
+        // Arm parachutes.
+
+        DECLARE LOCAL realChuteModules IS SHIP:MODULESNAMED("RealChuteModule").
+        FOR i IN realChuteModules {
+            IF i:HASEVENT("arm parachute") {
+                i:DOEVENT("arm parachute").
+            }
+        }
+
+        // Fire the launch escape system.
+
+        IF launchEscapeSystemPartModule:HASEVENT("abort!") {
+            launchEscapeSystemPartModule:DOEVENT("abort!").
+        }
+    }
+
+    IF launchEscapeSystemPartModule = 0 {
+
+        DECLARE LOCAL selfDestructModules IS SHIP:MODULESNAMED("TacSelfDestruct").
+        IF NOT selfDestructModules:EMPTY {
+
+            StopTimeWarp().
+            MissionLog("ABORT").
+
+            UNLOCK THROTTLE.
+            UNLOCK STEERING.
+            SET SHIP:CONTROL:NEUTRALIZE TO TRUE.
+            SET RCS TO initialRCSState.
+
+            enginesRunningAllThrottleable:CLEAR().
+            enginesRunningAllThrottleLocked:CLEAR().
+
+            FOR i IN selfDestructModules {
+                IF i:HASEVENT("self destruct!") {
+                    i:DOEVENT("self destruct!").
+                }
+            }
+
+        }
     }
 
 }
