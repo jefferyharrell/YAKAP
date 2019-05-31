@@ -492,7 +492,7 @@ DECLARE GLOBAL FUNCTION ModePrelaunchTransitionInFunction {
         IF i:HASMODULE("ModuleProceduralFairing") AND i:GETMODULE("ModuleProceduralFairing"):HASEVENT("deploy") {
             payloadFairingsAll:PUSH(i).
         }
-        IF i:HASMODULE("ProceduralFairingDecoupler") AND i:GETMODULE("ProceduralFairingDecoupler"):HASEVENT("jettison fairing") {
+    IF i:HASMODULE("ProceduralFairingDecoupler") AND NOT i:PARENT:HASMODULE("ProceduralFairingAdapter") AND i:GETMODULE("ProceduralFairingDecoupler"):HASEVENT("jettison fairing") {
             payloadFairingsAll:PUSH(i).
         }
     }
