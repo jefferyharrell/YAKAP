@@ -105,8 +105,6 @@ DECLARE GLOBAL launchEscapeSystemPartModule      IS 0.
 DECLARE GLOBAL enginesRunningAllThrottleable     IS LIST().
 DECLARE GLOBAL enginesRunningAllThrottleLocked   IS LIST().
 
-DECLARE GLOBAL solarPanelsStageTwoAll            IS QUEUE().
-
 // PID controllers. Coefficients have been determined empirically.
 DECLARE GLOBAL throttlePIDController IS PIDLOOP(0.250, 0.200, 0.000, 0.1, 1.0).
 DECLARE GLOBAL rcsForePIDController  IS PIDLOOP(0.001, 0.001, 0.000, 0.0, 1.0).
@@ -507,14 +505,6 @@ DECLARE GLOBAL FUNCTION ModePrelaunchTransitionInFunction {
     DECLARE LOCAL lesModules IS SHIP:MODULESNAMED("ModulePebkacLesController2").
     IF NOT lesModules:EMPTY {
         SET launchEscapeSystemPartModule TO lesModules[0].
-    }
-
-    // Find all solar panels on stage two.
-
-    FOR i IN allParts {
-        IF i:HASMODULE("ModuleDeployableSolarPanel") AND i:STAGE = kspS2StageNumber - 1 {
-            solarPanelsStageTwoAll:PUSH(i).
-        }
     }
 
     ////////////////////////////////////////////////////////////////////////////
@@ -1416,16 +1406,6 @@ DECLARE GLOBAL FUNCTION ModePoweredCoastTransitionInFunction {
     SET controlThrottle TO 0.0.
     LOCK THROTTLE TO controlThrottle.
 
-    IF NOT solarPanelsStageTwoAll:EMPTY {
-        MissionLog("SOLAR PANEL DEPLOY").
-        UNTIL solarPanelsStageTwoAll:EMPTY {
-            DECLARE LOCAL p IS solarPanelsStageTwoAll:POP().
-            IF p:SHIP = SHIP AND p:HASMODULE("ModuleDeployableSolarPanel") AND p:GETMODULE("ModuleDeployableSolarPanel"):HASEVENT("extend solar panel") {
-                p:GETMODULE("ModuleDeployableSolarPanel"):DOEVENT("extend solar panel").
-            }
-        }
-    }
-
     RCS ON.
     SET rcsForePIDController:SETPOINT TO launchToApoapsis.
     SET SHIP:CONTROL:FORE TO rcsForePIDController:UPDATE(TIME:SECONDS, ALT:APOAPSIS).
@@ -1500,16 +1480,6 @@ DECLARE GLOBAL FUNCTION ModePoweredCoastTransitionOutFunction {
 DECLARE GLOBAL FUNCTION ModeComputeApoapsisManeuverTransitionInFunction {
     SET ModeName TO "COMPUTE APOAPSIS MANEUVER".
     MissionLog("MODE TO " + ModeName).
-
-    IF NOT solarPanelsStageTwoAll:EMPTY {
-        MissionLog("SOLAR PANEL DEPLOY").
-        UNTIL solarPanelsStageTwoAll:EMPTY {
-            DECLARE LOCAL p IS solarPanelsStageTwoAll:POP().
-            IF p:SHIP = SHIP AND p:HASMODULE("ModuleDeployableSolarPanel") AND p:GETMODULE("ModuleDeployableSolarPanel"):HASEVENT("extend solar panel") {
-                p:GETMODULE("ModuleDeployableSolarPanel"):DOEVENT("extend solar panel").
-            }
-        }
-    }
 
     DECLARE LOCAL v1 IS SQRT( SHIP:BODY:MU * ( (2/(SHIP:BODY:RADIUS + ALT:APOAPSIS)) - (1/SHIP:ORBIT:SEMIMAJORAXIS) ) ).
     DECLARE LOCAL v2 IS SQRT( SHIP:BODY:MU * ( (2/(SHIP:BODY:RADIUS + ALT:APOAPSIS)) - (1/launchToSemimajorAxis) ) ).
